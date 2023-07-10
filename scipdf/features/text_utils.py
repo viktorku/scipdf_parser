@@ -1,12 +1,12 @@
 import numpy as np
 import pandas as pd
 import textstat
-import spacy
+# import spacy
 from collections import Counter
 from itertools import groupby
 
 
-nlp = spacy.load("en_core_web_sm")
+#nlp = spacy.load("en_core_web_sm")
 
 PRESENT_TENSE_VERB_LIST = ["VB", "VBP", "VBZ", "VBG"]
 VERB_LIST = ["VB", "VBP", "VBZ", "VBG", "VBN", "VBD"]
