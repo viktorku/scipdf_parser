@@ -3,17 +3,18 @@ import os
 import os.path as op
 from glob import glob
 import urllib
+import asyncio
+from typing import List
 import subprocess
 import requests
 from bs4 import BeautifulSoup, NavigableString
 from tqdm import tqdm, tqdm_notebook
+import aiohttp
 
 
 GROBID_URL = "http://localhost:8070"
 DIR_PATH = op.dirname(op.abspath(__file__))
-PDF_FIGURES_JAR_PATH = op.join(
-    DIR_PATH, "pdffigures2", "pdffigures2-assembly-0.0.12-SNAPSHOT.jar"
-)
+PDF_FIGURES_JAR_PATH = op.join(DIR_PATH, "pdffigures2", "pdffigures2-assembly-0.0.12-SNAPSHOT.jar")
 
 
 def list_pdf_paths(pdf_folder: str):
@@ -37,6 +38,60 @@ def validate_url(path: str):
         re.IGNORECASE,
     )
     return re.match(regex, path) is not None
+
+
+async def post_parse_pdf(session: aiohttp.ClientSession, url: str, pdf: bytes, soup: bool):
+    try:
+        # Asynchronously post the PDF and fetch the result
+        async with session.post(url, data={"input": pdf}) as response:
+            if response.status == 200:
+                text = await response.text()
+                # Return parsed HTML or raw text based on the `soup` flag
+                return BeautifulSoup(text, "lxml") if soup and text is not None else text
+            return None
+    except Exception as e:
+        print(f"Something went wrong calling GROBID: {e.args[0]}")
+        return None
+
+
+async def parse_pdfs(
+    pdfs: List[bytes],
+    fulltext: bool = True,
+    soup: bool = False,
+    return_coordinates: bool = True,
+    grobid_url: str = GROBID_URL,
+):
+    # GROBID URL
+    if fulltext:
+        url = "%s/api/processFulltextDocument" % grobid_url
+    else:
+        url = "%s/api/processHeaderDocument" % grobid_url
+
+    files = []
+    if return_coordinates:
+        files += [
+            ("teiCoordinates", (None, "persName")),
+            ("teiCoordinates", (None, "figure")),
+            ("teiCoordinates", (None, "ref")),
+            ("teiCoordinates", (None, "formula")),
+            ("teiCoordinates", (None, "biblStruct")),
+        ]
+
+    parsed_articles: List[BeautifulSoup | str | None] = []
+
+    # Create a session for making HTTP requests
+    async with aiohttp.ClientSession() as session:
+        # Asynchronously send requests for all PDF bytes in the list
+        tasks = [post_parse_pdf(session, url, pdf_bytes, soup) for pdf_bytes in pdfs]
+
+        # Gather results from all tasks
+        results = await asyncio.gather(*tasks)
+
+        # Filter out None results and append to parsed_articles
+        for result in results:
+            parsed_articles.append(result)
+
+    return parsed_articles
 
 
 def parse_pdf(
@@ -94,9 +149,7 @@ def parse_pdf(
             page = urllib.request.urlopen(pdf_path).read()
             parsed_article = requests.post(url, files={"input": page}).text
         elif op.exists(pdf_path):
-            parsed_article = requests.post(
-                url, files={"input": open(pdf_path, "rb")}
-            ).text
+            parsed_article = requests.post(url, files={"input": open(pdf_path, "rb")}).text
         else:
             parsed_article = None
     elif isinstance(pdf_path, bytes):
@@ -149,9 +202,7 @@ def parse_abstract(article):
     abstract = ""
     for p in list(div.children):
         if not isinstance(p, NavigableString) and len(list(p)) > 0:
-            abstract += " ".join(
-                [elem.text for elem in p if not isinstance(elem, NavigableString)]
-            )
+            abstract += " ".join([elem.text for elem in p if not isinstance(elem, NavigableString)])
     return abstract
 
 
@@ -159,12 +210,8 @@ def calculate_number_of_references(div):
     """
     For a given section, calculate number of references made in the section
     """
-    n_publication_ref = len(
-        [ref for ref in div.find_all("ref") if ref.attrs.get("type") == "bibr"]
-    )
-    n_figure_ref = len(
-        [ref for ref in div.find_all("ref") if ref.attrs.get("type") == "figure"]
-    )
+    n_publication_ref = len([ref for ref in div.find_all("ref") if ref.attrs.get("type") == "bibr"])
+    n_figure_ref = len([ref for ref in div.find_all("ref") if ref.attrs.get("type") == "figure"])
     return {"n_publication_ref": n_publication_ref, "n_figure_ref": n_figure_ref}
 
 
@@ -401,6 +448,31 @@ def parse_pdf_to_dict(
     return article_dict
 
 
+async def parse_pdfs_to_dicts(
+    pdfs: List[bytes],
+    fulltext: bool = True,
+    soup: bool = True,
+    as_list: bool = False,
+    return_coordinates: bool = True,
+    grobid_url: str = GROBID_URL,
+):
+    parsed_articles = await parse_pdfs(
+        pdfs,
+        fulltext=fulltext,
+        soup=soup,
+        return_coordinates=return_coordinates,
+        grobid_url=grobid_url,
+    )
+    article_dicts = []
+    for parsed_article in parsed_articles:
+        try:
+            article_dicts.append(convert_article_soup_to_dict(parsed_article, as_list=as_list))
+        except Exception as e:
+            print(f"Something went wrong when converting BeautifulSoup article to dict: {e.args[0]}")
+            article_dicts.append(None)
+    return article_dicts
+
+
 def parse_figures(
     pdf_folder: str,
     jar_path: str = PDF_FIGURES_JAR_PATH,
@@ -445,11 +517,7 @@ def parse_figures(
             "-m",
             op.join(op.abspath(figure_path), ""),  # end path with "/"
         ]
-        _ = subprocess.run(
-            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20
-        )
+        _ = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
         print("Done parsing figures from PDFs!")
     else:
-        print(
-            "You may have to check of ``data`` and ``figures`` in the the output folder path."
-        )
+        print("You may have to check of ``data`` and ``figures`` in the the output folder path.")

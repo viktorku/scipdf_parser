@@ -2,3 +2,5 @@ lxml
 pandas
 textstat
 beautifulsoup4
+aiohttp
+aiodns
